@@ -1,0 +1,32 @@
+# ⚡ БЫСТРОЕ РЕШЕНИЕ - Рецепты не появляются в Firebase
+
+## 🎯 Сделайте это ДЕ СЕЙЧАС (1 минута)
+
+1. Откройте: https://console.firebase.google.com/project/edafit-f3738/firestore/rules
+
+2. Замените весь текст на:
+```
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /recipes/{document=**} {
+      allow read: if true;
+      allow write: if true;
+    }
+  }
+}
+```
+
+3. Нажмите **PUBLISH**
+
+4. Закройте приложение и откройте заново
+
+5. Нажмите "Начать импорт" еще раз
+
+## ✅ ГОТОВО!
+
+Рецепты должны теперь добавиться в Firebase. Проверьте Firebase Console → Firestore Database → recipes.
+
+## 📖 Подробное объяснение
+
+Смотрите: `FIX_RECIPES_NOT_APPEARING.md`
