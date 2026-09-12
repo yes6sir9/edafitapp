@@ -136,7 +136,14 @@ class _MainScreenState extends State<MainScreen> {
   List<Widget> get _screens {
     return [
       HomeScreen(userData: _userData),
-      StatisticsScreen(userData: _userData),
+      StatisticsScreen(
+        userData: _userData,
+        onUserDataUpdated: (data) {
+          setState(() {
+            _userData.addAll(data);
+          });
+        },
+      ),
       RecipesScreen(userData: _userData),
       ProfileScreen(
         userData: _userData,

@@ -104,7 +104,7 @@ class _FoodPhotoAnalyzerSheetState extends State<_FoodPhotoAnalyzerSheet> {
       setState(() => _error = e.message);
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = 'Ошибка Gemini: $e');
+      setState(() => _error = _aiService.formatUserError(e));
     } finally {
       if (mounted) {
         setState(() => _isAnalyzing = false);

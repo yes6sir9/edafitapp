@@ -35,8 +35,29 @@ class HealthSyncService {
     HealthDataType.ACTIVE_ENERGY_BURNED,
   ];
 
+  String formatUserError(Object error) {
+    final message = error.toString().toLowerCase();
+    if (message.contains('null') && message.contains('string')) {
+      return 'Не удалось подключить источник здоровья. Обновите приложение Health Connect и повторите.';
+    }
+    if (message.contains('health connect')) {
+      return 'Установите/обновите Health Connect и повторите подключение.';
+    }
+    if (message.contains('not provided') || message.contains('not granted')) {
+      return 'Доступ к данным здоровья не предоставлен. Разрешите доступ в системном окне.';
+    }
+    if (message.startsWith('exception: ')) {
+      return error.toString().substring('Exception: '.length);
+    }
+    return 'Не удалось подключить здоровье. Проверьте разрешения и повторите.';
+  }
+
   Future<HealthSyncResult> connectAndSyncToday() async {
-    await _health.configure();
+    try {
+      await _health.configure();
+    } catch (e) {
+      throw Exception(formatUserError(e));
+    }
 
     if (Platform.isAndroid) {
       final recognitionStatus = await Permission.activityRecognition.request();
@@ -44,9 +65,18 @@ class HealthSyncService {
         throw Exception('Разрешите доступ к активности (шагам) в настройках Android.');
       }
 
-      final status = await _health.getHealthConnectSdkStatus();
-      if (status != HealthConnectSdkStatus.sdkAvailable) {
-        await _health.installHealthConnect();
+      HealthConnectSdkStatus? status;
+      try {
+        status = await _health.getHealthConnectSdkStatus();
+      } catch (e) {
+        throw Exception(formatUserError(e));
+      }
+      if (status == null || status != HealthConnectSdkStatus.sdkAvailable) {
+        try {
+          await _health.installHealthConnect();
+        } catch (_) {
+          // Best effort: still show actionable message below.
+        }
         throw Exception(
           'Установите/обновите Health Connect и повторите подключение.',
         );
@@ -58,10 +88,15 @@ class HealthSyncService {
       HealthDataAccess.READ,
     );
 
-    final authorized = await _health.requestAuthorization(
-      _types,
-      permissions: permissions,
-    );
+    final bool authorized;
+    try {
+      authorized = await _health.requestAuthorization(
+        _types,
+        permissions: permissions,
+      );
+    } catch (e) {
+      throw Exception(formatUserError(e));
+    }
     if (!authorized) {
       throw Exception(
         'Доступ к данным здоровья не предоставлен. Разрешите доступ в системном окне.',
@@ -72,14 +107,24 @@ class HealthSyncService {
     final start = DateTime(now.year, now.month, now.day);
     final end = now;
 
-    final steps =
-        await _health.getTotalStepsInInterval(start, end, includeManualEntry: true) ?? 0;
+    final int steps;
+    try {
+      steps =
+          await _health.getTotalStepsInInterval(start, end, includeManualEntry: true) ?? 0;
+    } catch (e) {
+      throw Exception(formatUserError(e));
+    }
 
-    final points = await _health.getHealthDataFromTypes(
-      startTime: start,
-      endTime: end,
-      types: const [HealthDataType.ACTIVE_ENERGY_BURNED],
-    );
+    final List<HealthDataPoint> points;
+    try {
+      points = await _health.getHealthDataFromTypes(
+        startTime: start,
+        endTime: end,
+        types: const [HealthDataType.ACTIVE_ENERGY_BURNED],
+      );
+    } catch (e) {
+      throw Exception(formatUserError(e));
+    }
 
     final calories = _sumNumericValues(points);
 

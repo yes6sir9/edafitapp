@@ -26,6 +26,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
   DateTime? _lastHealthSyncAt;
   bool _isSyncingHealth = false;
 
+  String _formatConnectError(Object error) {
+    return _healthSyncService.formatUserError(error);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -99,7 +103,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Не удалось подключить: $e')),
+        SnackBar(content: Text('Не удалось подключить: ${_formatConnectError(e)}')),
       );
     } finally {
       if (mounted) setState(() => _isSyncingHealth = false);

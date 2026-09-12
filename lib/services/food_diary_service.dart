@@ -9,7 +9,26 @@ class FoodDiaryService {
     [],
   );
 
-  String get currentDateKey => DateTime.now().toIso8601String().split('T').first;
+  String _activeDateKey = dateKey(DateTime.now());
+
+  String get activeDateKey => _activeDateKey;
+
+  String get todayDateKey => dateKey(DateTime.now());
+
+  bool get isViewingToday => _activeDateKey == todayDateKey;
+
+  static String dateKey(DateTime date) {
+    final normalized = DateTime(date.year, date.month, date.day);
+    return normalized.toIso8601String().split('T').first;
+  }
+
+  void setActiveDate(DateTime date) {
+    _activeDateKey = dateKey(date);
+  }
+
+  void resetActiveDateToToday() {
+    _activeDateKey = todayDateKey;
+  }
 
   void loadDailyDiary(Map<String, dynamic>? dailyDiary) {
     if (dailyDiary == null) {
@@ -17,9 +36,9 @@ class FoodDiaryService {
       return;
     }
 
-    final todayData = dailyDiary[currentDateKey];
-    if (todayData is Map<String, dynamic>) {
-      final entries = (todayData['entries'] as List<dynamic>?)
+    final dayData = dailyDiary[_activeDateKey];
+    if (dayData is Map<String, dynamic>) {
+      final entries = (dayData['entries'] as List<dynamic>?)
               ?.map((item) => Map<String, dynamic>.from(item as Map))
               .toList() ??
           [];
@@ -34,7 +53,7 @@ class FoodDiaryService {
         ? Map<String, dynamic>.from(existingDiary)
         : <String, dynamic>{};
 
-    payload[currentDateKey] = {
+    payload[_activeDateKey] = {
       'entries': eatenRecipes.value,
       'totals': {
         'calories': getTotalCalories(),

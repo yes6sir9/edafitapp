@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:edafitapp/services/auth_service.dart';
 import 'package:edafitapp/services/food_diary_service.dart';
+import 'package:edafitapp/services/ai_service.dart';
+import 'package:edafitapp/services/nutrition_service.dart';
 import 'package:edafitapp/widgets/food_photo_analyzer_sheet.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -15,11 +17,22 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final FoodDiaryService _diaryService = FoodDiaryService.instance;
   final AuthService _authService = AuthService();
+  final AIService _aiService = AIService();
+
+  late DateTime _selectedDate;
+  NutritionPlan? _nutritionPlan;
+  String? _aiAdvice;
+  bool _aiAdviceLoading = false;
+  final Map<String, String> _aiAdviceCache = {};
 
   @override
   void initState() {
     super.initState();
+    _selectedDate = DateTime.now();
+    _diaryService.setActiveDate(_selectedDate);
     _loadDailyDiaryFromUser();
+    _calculateNutritionPlan();
+    _fetchAiAdvice();
   }
 
   @override
@@ -55,7 +68,6 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   String _formatDate() {
-    final now = DateTime.now();
     const months = [
       'января',
       'февраля',
@@ -70,7 +82,236 @@ class _HomeScreenState extends State<HomeScreen> {
       'ноября',
       'декабря',
     ];
-    return '${now.day} ${months[now.month - 1]} ${now.year} г.';
+    return '${_selectedDate.day} ${months[_selectedDate.month - 1]} ${_selectedDate.year} г.';
+  }
+
+  String _formatSelectedDateLabel() {
+    final today = DateTime.now();
+    if (_isSameDay(_selectedDate, today)) return 'Сегодня';
+    if (_isSameDay(
+      _selectedDate,
+      today.subtract(const Duration(days: 1)),
+    )) {
+      return 'Вчера';
+    }
+    return _formatDate();
+  }
+
+  bool _isSameDay(DateTime a, DateTime b) {
+    return a.year == b.year && a.month == b.month && a.day == b.day;
+  }
+
+  DateTime get _todayDate {
+    final now = DateTime.now();
+    return DateTime(now.year, now.month, now.day);
+  }
+
+  bool get _canGoForward => !_isSameDay(_selectedDate, _todayDate);
+
+  void _calculateNutritionPlan() {
+    final workoutsData = widget.userData['workouts'];
+    final workouts = <Map<String, dynamic>>[];
+    if (workoutsData is List) {
+      for (final workout in workoutsData) {
+        if (workout is Map<String, dynamic>) {
+          workouts.add(workout);
+        } else if (workout is Map) {
+          workouts.add(Map<String, dynamic>.from(workout));
+        }
+      }
+    }
+    _nutritionPlan = NutritionService.calculatePlan(widget.userData, workouts);
+  }
+
+  int _getTargetCalories() {
+    return (_nutritionPlan?.targetCalories ?? 1800).round();
+  }
+
+  Future<void> _shiftDay(int delta) async {
+    final current = DateTime(
+      _selectedDate.year,
+      _selectedDate.month,
+      _selectedDate.day,
+    );
+    final newDate = current.add(Duration(days: delta));
+    if (newDate.isAfter(_todayDate)) return;
+
+    await _saveDailyDiaryToFirestore();
+
+    setState(() {
+      _selectedDate = newDate;
+      _diaryService.setActiveDate(_selectedDate);
+    });
+    _loadDailyDiaryFromUser();
+    await _fetchAiAdvice();
+  }
+
+  Future<void> _fetchAiAdvice({bool forceRefresh = false}) async {
+    final dateKey = FoodDiaryService.dateKey(_selectedDate);
+    if (!forceRefresh && _aiAdviceCache.containsKey(dateKey)) {
+      setState(() {
+        _aiAdvice = _aiAdviceCache[dateKey];
+        _aiAdviceLoading = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _aiAdviceLoading = true;
+      if (forceRefresh) _aiAdvice = null;
+    });
+
+    _calculateNutritionPlan();
+    final plan = _nutritionPlan;
+    if (plan == null) {
+      if (mounted) {
+        setState(() => _aiAdviceLoading = false);
+      }
+      return;
+    }
+
+    final advice = await _aiService.generateDailyNutritionTip(
+      goal: plan.goal,
+      dateLabel: _formatSelectedDateLabel(),
+      eatenCalories: _getTotalCalories(),
+      eatenProteins: _diaryService.getTotalProteins(),
+      eatenFats: _diaryService.getTotalFats(),
+      eatenCarbs: _diaryService.getTotalCarbs(),
+      targetCalories: plan.targetCalories.round(),
+      targetProteins: plan.proteinGrams,
+      targetFats: plan.fatGrams,
+      targetCarbs: plan.carbGrams,
+      meals: _diaryService.eatenRecipes.value,
+    );
+
+    if (!mounted) return;
+
+    _aiAdviceCache[dateKey] = advice;
+    setState(() {
+      _aiAdvice = advice;
+      _aiAdviceLoading = false;
+    });
+  }
+
+  Widget _buildAiAdviceCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF5F8EE),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFDDE6CF)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFA5C75D).withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.auto_awesome,
+                  color: Color(0xFF6B8F3D),
+                  size: 18,
+                ),
+              ),
+              const SizedBox(width: 10),
+              const Expanded(
+                child: Text(
+                  'Совет дня',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF24292E),
+                  ),
+                ),
+              ),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                tooltip: 'Обновить совет',
+                onPressed: _aiAdviceLoading
+                    ? null
+                    : () => _fetchAiAdvice(forceRefresh: true),
+                icon: Icon(
+                  Icons.refresh,
+                  size: 20,
+                  color: _aiAdviceLoading ? Colors.grey : const Color(0xFF6B8F3D),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (_aiAdviceLoading)
+            const Row(
+              children: [
+                SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                SizedBox(width: 12),
+                Text(
+                  'Готовлю персональный совет...',
+                  style: TextStyle(fontSize: 14, color: Colors.grey),
+                ),
+              ],
+            )
+          else
+            Text(
+              _aiAdvice ?? 'Совет появится после загрузки.',
+              style: const TextStyle(
+                fontSize: 14,
+                height: 1.45,
+                color: Color(0xFF4A4A4A),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDateSwitcher() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          onPressed: () => _shiftDay(-1),
+          icon: const Icon(Icons.chevron_left, size: 28),
+          color: const Color(0xFF24292E),
+        ),
+        Column(
+          children: [
+            Text(
+              _formatSelectedDateLabel(),
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            if (!_isSameDay(_selectedDate, _todayDate))
+              Text(
+                _formatDate(),
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+              ),
+          ],
+        ),
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          onPressed: _canGoForward ? () => _shiftDay(1) : null,
+          icon: const Icon(Icons.chevron_right, size: 28),
+          color: _canGoForward
+              ? const Color(0xFF24292E)
+              : Colors.grey.shade400,
+        ),
+      ],
+    );
   }
 
   int _getTotalCalories() {
@@ -181,6 +422,10 @@ class _HomeScreenState extends State<HomeScreen> {
                                 );
                               });
                               await _saveDailyDiaryToFirestore();
+                              _aiAdviceCache.remove(
+                                FoodDiaryService.dateKey(_selectedDate),
+                              );
+                              await _fetchAiAdvice(forceRefresh: true);
                             },
                           ),
                         ],
@@ -200,7 +445,10 @@ class _HomeScreenState extends State<HomeScreen> {
       context,
       onDiarySaved: _saveDailyDiaryToFirestore,
     );
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    setState(() {});
+    _aiAdviceCache.remove(FoodDiaryService.dateKey(_selectedDate));
+    await _fetchAiAdvice(forceRefresh: true);
   }
 
   @override
@@ -251,13 +499,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                   ),
                                 ),
                                 const SizedBox(height: 8),
-                                Text(
-                                  _formatDate(),
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    color: Colors.grey.shade600,
-                                  ),
-                                ),
+                                _buildDateSwitcher(),
                               ],
                             ),
                             Container(
@@ -293,54 +535,72 @@ class _HomeScreenState extends State<HomeScreen> {
 
                       // Калории круговой граф
                       Center(
-                        child: Container(
-                          padding: const EdgeInsets.all(24),
-                          child: Column(
+                        child: SizedBox(
+                          width: 180,
+                          height: 180,
+                          child: Stack(
+                            alignment: Alignment.center,
                             children: [
-                              SizedBox(
-                                width: 150,
-                                height: 150,
-                                child: Stack(
-                                  alignment: Alignment.center,
-                                  children: [
-                                    CircularProgressIndicator(
-                                      value: (_getTotalCalories() / 1800).clamp(
-                                        0.0,
-                                        1.0,
-                                      ),
-                                      strokeWidth: 12,
-                                      backgroundColor: Colors.grey.shade300,
-                                      valueColor: AlwaysStoppedAnimation(
-                                        Colors.orange.shade400,
-                                      ),
-                                    ),
-                                    Column(
-                                      mainAxisAlignment: MainAxisAlignment.center,
-                                      children: [
-                                        Text(
-                                          "${_getTotalCalories()}",
-                                          style: const TextStyle(
-                                            fontSize: 36,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 6),
-                                        const Text(
-                                          "ккал",
-                                          style: TextStyle(
-                                            fontSize: 12,
-                                            color: Colors.grey,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ],
+                              SizedBox.expand(
+                                child: CircularProgressIndicator(
+                                  value: (_getTotalCalories() /
+                                          _getTargetCalories())
+                                      .clamp(
+                                    0.0,
+                                    1.0,
+                                  ),
+                                  strokeWidth: 14,
+                                  strokeCap: StrokeCap.round,
+                                  backgroundColor: const Color(0xFFE8E8E8),
+                                  valueColor: const AlwaysStoppedAnimation(
+                                    Color(0xFFFFA726),
+                                  ),
                                 ),
+                              ),
+                              Column(
+                                mainAxisSize: MainAxisSize.min,
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Text(
+                                    "${_getTotalCalories()}",
+                                    style: const TextStyle(
+                                      fontSize: 40,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFF24292E),
+                                      height: 1.0,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  const Text(
+                                    "ккал",
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: Color(0xFF999999),
+                                      height: 1.0,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ],
                           ),
                         ),
                       ),
+                      const SizedBox(height: 8),
+                      Center(
+                        child: Text(
+                          _getTotalCalories() >= _getTargetCalories()
+                              ? 'Перебор на ${_getTotalCalories() - _getTargetCalories()} ккал'
+                              : 'Осталось ${_getTargetCalories() - _getTotalCalories()} ккал из ${_getTargetCalories()}',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: _getTotalCalories() > _getTargetCalories()
+                                ? Colors.red.shade400
+                                : Colors.grey.shade600,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      _buildAiAdviceCard(),
                       const SizedBox(height: 24),
                     ],
                   );
@@ -348,25 +608,30 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
 
               // БЖУ (Белки, Жиры, Углеводы)
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  _buildMacroCard(
-                    "Белки",
-                    "${_getTotalProteins()}г",
-                    const Color(0xFFDDE6CF),
-                  ),
-                  _buildMacroCard(
-                    "Жиры",
-                    "${_getTotalFats()}г",
-                    const Color(0xFFF0E8E8),
-                  ),
-                  _buildMacroCard(
-                    "Углеводы",
-                    "${_getTotalCarbs()}г",
-                    const Color(0xFFDDE6CF),
-                  ),
-                ],
+              ValueListenableBuilder<List<Map<String, dynamic>>>(
+                valueListenable: _diaryService.eatenRecipes,
+                builder: (context, eatenRecipes, child) {
+                  return Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      _buildMacroCard(
+                        "Белки",
+                        "${_getTotalProteins()}г",
+                        const Color(0xFFDDE6CF),
+                      ),
+                      _buildMacroCard(
+                        "Жиры",
+                        "${_getTotalFats()}г",
+                        const Color(0xFFF0E8E8),
+                      ),
+                      _buildMacroCard(
+                        "Углеводы",
+                        "${_getTotalCarbs()}г",
+                        const Color(0xFFDDE6CF),
+                      ),
+                    ],
+                  );
+                },
               ),
               const SizedBox(height: 32),
 

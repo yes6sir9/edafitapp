@@ -11,6 +11,7 @@ import 'gemini_http_client.dart';
 class AIService {
   static final http.Client _httpClient = createGeminiHttpClient();
   static const Duration _requestTimeout = Duration(seconds: 120);
+  static const Duration _retryDelay = Duration(seconds: 2);
 
   GenerativeModel _createModel(
     String modelName, {
@@ -39,8 +40,13 @@ class AIService {
 
   bool _shouldTryNextModel(Object e) {
     final msg = e.toString().toLowerCase();
+    final isServiceBusy = msg.contains('503') ||
+        msg.contains('unavailable') ||
+        msg.contains('high demand') ||
+        msg.contains('try again later');
     return msg.contains('quota') ||
         msg.contains('429') ||
+        isServiceBusy ||
         msg.contains('limit: 0') ||
         msg.contains('not found') ||
         msg.contains('not supported') ||
@@ -50,6 +56,35 @@ class AIService {
         msg.contains('socket') ||
         msg.contains('failed host lookup') ||
         msg.contains('connection');
+  }
+
+  String formatUserError(Object error) {
+    final msg = error.toString().toLowerCase();
+    if (msg.contains('503') ||
+        msg.contains('unavailable') ||
+        msg.contains('high demand') ||
+        msg.contains('try again later')) {
+      return 'Сервис Gemini сейчас перегружен. Повторите через 30-60 секунд.';
+    }
+    if (msg.contains('429') || msg.contains('quota') || msg.contains('limit')) {
+      return 'Превышен лимит Gemini API. Проверьте квоту и попробуйте позже.';
+    }
+    if (msg.contains('timeout') ||
+        msg.contains('timed out') ||
+        msg.contains('socket') ||
+        msg.contains('failed host lookup') ||
+        msg.contains('connection')) {
+      return 'Проблема с сетью при обращении к Gemini. Проверьте интернет и повторите.';
+    }
+    if (error is StateError) {
+      return error.message;
+    }
+
+    final raw = error.toString();
+    if (raw.startsWith('Exception: ')) {
+      return raw.substring('Exception: '.length);
+    }
+    return 'Не удалось получить ответ Gemini. Повторите попытку позже.';
   }
 
   Future<String?> _generateContentText(
@@ -72,19 +107,63 @@ class AIService {
         return response.text?.trim();
       } on TimeoutException {
         if (attempt == 0) {
-          await Future<void>.delayed(const Duration(seconds: 2));
+          await Future<void>.delayed(_retryDelay);
           continue;
         }
         rethrow;
       } catch (e) {
         if (attempt == 0 && _shouldTryNextModel(e)) {
-          await Future<void>.delayed(const Duration(seconds: 2));
+          await Future<void>.delayed(_retryDelay);
           continue;
         }
         rethrow;
       }
     }
     return null;
+  }
+
+  Future<String> generateDailyNutritionTip({
+    required String goal,
+    required String dateLabel,
+    required int eatenCalories,
+    required double eatenProteins,
+    required double eatenFats,
+    required double eatenCarbs,
+    required int targetCalories,
+    required double targetProteins,
+    required double targetFats,
+    required double targetCarbs,
+    required List<Map<String, dynamic>> meals,
+  }) async {
+    if (!GeminiConfig.isConfigured) {
+      return 'Подключите Gemini API в настройках, чтобы получать персональные советы.';
+    }
+
+    final mealsSummary = meals.isEmpty
+        ? 'Пока ничего не съедено.'
+        : meals
+            .map(
+              (meal) =>
+                  '- ${meal['title'] ?? meal['name'] ?? 'Блюдо'}: ${meal['calories']} ккал',
+            )
+            .join('\n');
+
+    final remaining = targetCalories - eatenCalories;
+
+    final prompt = '''
+Ты диетолог. Дай один короткий совет на русском (максимум 2 предложения, до 140 символов).
+Цель: $goal
+День: $dateLabel
+Съедено: $eatenCalories ккал (белки ${eatenProteins.round()} г, жиры ${eatenFats.round()} г, углеводы ${eatenCarbs.round()} г)
+Цель на день: $targetCalories ккал (белки ${targetProteins.round()} г, жиры ${targetFats.round()} г, углеводы ${targetCarbs.round()} г)
+Остаток калорий: $remaining ккал
+Блюда:
+$mealsSummary
+
+Без markdown, без списков и кавычек — только текст совета.
+''';
+
+    return generate(prompt);
   }
 
   Future<String> generate(String prompt) async {
@@ -104,12 +183,45 @@ class AIService {
       } catch (e) {
         lastError = e;
         if (_shouldTryNextModel(e)) continue;
-        return 'Ошибка Gemini: $e';
+        return formatUserError(e);
       }
     }
 
-    return 'Ошибка Gemini: $lastError\n'
-        'Проверьте интернет или подождите и повторите.';
+    if (lastError != null) {
+      return formatUserError(lastError);
+    }
+    return 'Не удалось получить ответ Gemini. Повторите попытку позже.';
+  }
+
+  Future<String?> generateJson(
+    String prompt, {
+    int maxOutputTokens = 4096,
+  }) async {
+    if (!GeminiConfig.isConfigured) {
+      return null;
+    }
+
+    Object? lastError;
+    for (final modelName in GeminiConfig.modelsToTry) {
+      try {
+        final text = await _generateContentText(
+          modelName,
+          [Content.text(prompt)],
+          maxOutputTokens: maxOutputTokens,
+          jsonResponse: true,
+        );
+        if (text != null && text.isNotEmpty) return text;
+      } catch (e) {
+        lastError = e;
+        if (_shouldTryNextModel(e)) continue;
+        rethrow;
+      }
+    }
+
+    if (lastError != null) {
+      throw Exception(formatUserError(lastError!));
+    }
+    return null;
   }
 
   Future<FoodAnalysisResult?> _analyzeImage(
@@ -170,15 +282,14 @@ class AIService {
       } catch (e) {
         lastError = e;
         if (_shouldTryNextModel(e)) continue;
-        rethrow;
+        throw Exception(formatUserError(e));
       }
     }
 
-    throw Exception(
-      'Не удалось получить ответ (${tried.join(' → ')}).\n'
-      '$lastError\n'
-      'Проверьте GEMINI_API_KEY в .env и интернет. Повторите через 30 сек.',
-    );
+    final reason = lastError != null
+        ? formatUserError(lastError!)
+        : 'Не удалось получить ответ Gemini.';
+    throw Exception('$reason (${tried.join(' → ')})');
   }
 
   Future<FoodAnalysisResult?> analyzeFoodImage(
@@ -266,14 +377,16 @@ class AIService {
       } catch (e) {
         lastError = e;
         if (_shouldTryNextModel(e)) continue;
-        rethrow;
+        throw Exception(formatUserError(e));
       }
     }
 
-    throw Exception(
-      notRecognizedMessage.isNotEmpty
-          ? '$notRecognizedMessage (${tried.join(' → ')}).\n$lastError'
-          : 'Не удалось получить ответ (${tried.join(' → ')}).\n$lastError',
-    );
+    if (notRecognizedMessage.isNotEmpty) {
+      throw Exception(notRecognizedMessage);
+    }
+    final reason = lastError != null
+        ? formatUserError(lastError!)
+        : 'Не удалось получить ответ Gemini.';
+    throw Exception('$reason (${tried.join(' → ')})');
   }
 }

@@ -96,7 +96,7 @@ class _AddCustomRecipeSheetState extends State<_AddCustomRecipeSheet> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Ошибка: $e')),
+          SnackBar(content: Text(_aiService.formatUserError(e))),
         );
       }
     } finally {

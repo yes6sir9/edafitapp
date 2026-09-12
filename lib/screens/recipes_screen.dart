@@ -80,6 +80,7 @@ class _RecipesScreenState extends State<RecipesScreen> {
   }
 
   void _loadDiaryFromUserData() {
+    _diaryService.resetActiveDateToToday();
     final dailyDiaryData = widget.userData['dailyDiary'];
     if (dailyDiaryData is Map<String, dynamic>) {
       _diaryService.loadDailyDiary(dailyDiaryData);
@@ -115,7 +116,7 @@ class _RecipesScreenState extends State<RecipesScreen> {
       products: _myProducts,
       goal: goal,
       mealCategory: _categories[_selectedTab],
-      onProductsTap: _openProductPhotoSheet,
+      onProductsChanged: _saveProducts,
       onDiarySaved: _saveCurrentDayDiary,
     );
     if (mounted) setState(() {});
@@ -326,7 +327,7 @@ class _RecipesScreenState extends State<RecipesScreen> {
             fats: _extractMacroValue(bjuText, 'fat', '0'),
             carbs: _extractMacroValue(bjuText, 'carbs', '0'),
             category: category,
-            description:
+            instructions:
                 item['Подробное описание приготовление']?.toString() ?? '',
             ingredients: item['Продукты']?.toString() ?? '',
           ),
@@ -370,8 +371,9 @@ class _RecipesScreenState extends State<RecipesScreen> {
       fats: data['fats']?.toString() ?? '0',
       carbs: data['carbs']?.toString() ?? '0',
       category: _normalizeCategory(data['category']?.toString() ?? 'Обед'),
-      description: data['description']?.toString() ??
-          data['instructions']?.toString() ??
+      description: data['description']?.toString() ?? '',
+      instructions: data['instructions']?.toString() ??
+          data['description']?.toString() ??
           '',
       ingredients: data['ingredients']?.toString() ?? '',
       isCustom: true,
@@ -477,7 +479,7 @@ class _RecipesScreenState extends State<RecipesScreen> {
       fats: macros['fat']?.toString() ?? '0',
       carbs: macros['carbs']?.toString() ?? '0',
       category: _normalizeCategory(recipeType),
-      description: data['instructions']?.toString() ?? '',
+      instructions: data['instructions']?.toString() ?? '',
       ingredients: data['products']?.toString() ?? '',
     );
   }
@@ -512,6 +514,7 @@ class _RecipesScreenState extends State<RecipesScreen> {
       carbs: recipe.carbs,
       description: recipe.description,
       ingredients: recipe.ingredients,
+      instructions: recipe.cookingInstructions,
     );
 
     setState(() {});
@@ -1574,29 +1577,9 @@ class _RecipesScreenState extends State<RecipesScreen> {
           ),
           const SizedBox(height: 16),
 
-          // Описание рецепта
-          if (recipe.description.isNotEmpty) ...[
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    "Описание",
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.grey,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    recipe.description,
-                    style: const TextStyle(fontSize: 13),
-                  ),
-                ],
-              ),
-            ),
+          // Как готовить
+          if (recipe.cookingInstructions.isNotEmpty) ...[
+            _buildCookingStepsSection(recipe.cookingInstructions),
             const SizedBox(height: 12),
           ],
 
@@ -1776,14 +1759,19 @@ class _RecipesScreenState extends State<RecipesScreen> {
                   _buildDetailedMacro('Углеводы', recipe.carbs),
                 ],
               ),
-              if (recipe.description.isNotEmpty) ...[
+              if (recipe.cookingInstructions.isNotEmpty) ...[
                 const SizedBox(height: 12),
                 const Text(
-                  'Описание',
+                  'Как готовить',
                   style: TextStyle(fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 6),
-                Text(recipe.description),
+                ..._parseCookingSteps(recipe.cookingInstructions).map((step) {
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text(step, style: const TextStyle(fontSize: 13)),
+                  );
+                }),
               ],
               if (recipe.ingredients.isNotEmpty) ...[
                 const SizedBox(height: 12),
@@ -1816,6 +1804,49 @@ class _RecipesScreenState extends State<RecipesScreen> {
             child: Text(
               isAdded ? 'Добавлено' : 'Добавить в дневник',
               style: const TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  List<String> _parseCookingSteps(String text) {
+    if (text.trim().isEmpty) return [];
+
+    final rawSteps = text
+        .split(RegExp(r'\s+(?=\d+\.\s)'))
+        .map((step) => step.trim())
+        .where((step) => step.isNotEmpty)
+        .toList();
+
+    return rawSteps.asMap().entries.map((entry) {
+      final cleaned = entry.value.replaceFirst(RegExp(r'^\d+\.\s*'), '');
+      return '${entry.key + 1}. $cleaned';
+    }).toList();
+  }
+
+  Widget _buildCookingStepsSection(String instructions) {
+    final steps = _parseCookingSteps(instructions);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Как готовить',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+              color: Colors.grey,
+            ),
+          ),
+          const SizedBox(height: 8),
+          ...steps.map(
+            (step) => Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(step, style: const TextStyle(fontSize: 13)),
             ),
           ),
         ],
@@ -1858,10 +1889,14 @@ class Recipe {
   final String carbs;
   final String category;
   final String description;
+  final String instructions;
   final String ingredients;
   final Map<String, String> micronutrients;
   final Map<String, String> vitamins;
   final bool isCustom;
+
+  String get cookingInstructions =>
+      instructions.isNotEmpty ? instructions : description;
 
   Recipe({
     required this.id,
@@ -1872,6 +1907,7 @@ class Recipe {
     required this.carbs,
     required this.category,
     this.description = '',
+    this.instructions = '',
     this.ingredients = '',
     this.micronutrients = const {},
     this.vitamins = const {},

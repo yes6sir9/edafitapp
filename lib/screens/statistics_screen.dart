@@ -1,11 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:edafitapp/services/auth_service.dart';
+import 'package:edafitapp/services/health_sync_service.dart';
 import 'package:edafitapp/services/nutrition_service.dart';
 
 class StatisticsScreen extends StatefulWidget {
   final Map<String, dynamic> userData;
+  final ValueChanged<Map<String, dynamic>>? onUserDataUpdated;
 
-  const StatisticsScreen({super.key, required this.userData});
+  const StatisticsScreen({
+    super.key,
+    required this.userData,
+    this.onUserDataUpdated,
+  });
 
   @override
   State<StatisticsScreen> createState() => _StatisticsScreenState();
@@ -18,6 +24,12 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
   int _currentWeight = 70;
   int _targetWeight = 60;
   final AuthService _authService = AuthService();
+  final HealthSyncService _healthSyncService = HealthSyncService();
+  bool _watchConnected = false;
+  String _watchPlatform = '';
+  double _watchActiveCalories = 0;
+  DateTime? _lastHealthSyncAt;
+  bool _isSyncingHealth = false;
   NutritionPlan? _nutritionPlan;
   late TextEditingController _currentWeightController;
   late TextEditingController _targetWeightController;
@@ -29,7 +41,20 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
     _targetWeightController = TextEditingController();
     _loadWorkoutsFromUserData();
     _loadWeightFromUserData();
+    _applyHealthIntegrationFromUserData();
     _calculateNutritionPlan();
+  }
+
+  @override
+  void didUpdateWidget(covariant StatisticsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.userData != widget.userData) {
+      _loadWorkoutsFromUserData();
+      _loadWeightFromUserData();
+      _applyHealthIntegrationFromUserData();
+      _calculateNutritionPlan();
+      setState(() {});
+    }
   }
 
   int get _workoutCalories => _workouts.fold<int>(
@@ -37,7 +62,15 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
     (sum, w) => sum + ((w['calories'] as num?)?.toInt() ?? 0),
   );
 
-  int get _stepsCalories => (_totalSteps * 0.04).round();
+  int get _stepsCalories {
+    if (_watchConnected && _watchActiveCalories > 0) {
+      return _watchActiveCalories.round();
+    }
+    return (_totalSteps * 0.04).round();
+  }
+
+  String get _activityCaloriesLabel =>
+      _watchConnected ? 'От смарт-часов' : 'От шагов';
 
   int get _baseCalories {
     final weight = _currentWeight.toDouble();
@@ -131,6 +164,68 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
         (widget.userData['targetWeight'] as num?)?.toInt() ?? _targetWeight;
     _currentWeightController.text = _currentWeight.toString();
     _targetWeightController.text = _targetWeight.toString();
+  }
+
+  void _applyHealthIntegrationFromUserData() {
+    final integration = widget.userData['healthIntegration'];
+    if (integration is! Map) {
+      _watchConnected = false;
+      _watchPlatform = '';
+      _watchActiveCalories = 0;
+      _lastHealthSyncAt = null;
+      return;
+    }
+    final data = Map<String, dynamic>.from(integration);
+    final syncedAtRaw = data['syncedAt']?.toString();
+    final connected = data['connected'] == true;
+
+    _watchConnected = connected;
+    _watchPlatform = (data['platform'] ?? '').toString();
+    _watchActiveCalories =
+        (data['activeCaloriesToday'] as num?)?.toDouble() ?? 0;
+    _lastHealthSyncAt =
+        syncedAtRaw == null ? null : DateTime.tryParse(syncedAtRaw);
+    if (connected) {
+      _totalSteps = (data['stepsToday'] as num?)?.toInt() ?? _totalSteps;
+    }
+  }
+
+  Future<void> _syncSmartWatch() async {
+    setState(() => _isSyncingHealth = true);
+    try {
+      final result = await _healthSyncService.connectAndSyncToday();
+      final integration = result.toMap();
+      await _authService.saveHealthIntegration(integration);
+      if (!mounted) return;
+
+      setState(() {
+        _watchConnected = result.connected;
+        _watchPlatform = result.platform;
+        _watchActiveCalories = result.activeCaloriesToday;
+        _lastHealthSyncAt = result.syncedAt;
+        _totalSteps = result.stepsToday;
+      });
+      widget.onUserDataUpdated?.call({'healthIntegration': integration});
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Смарт-часы: ${result.stepsToday} шагов, ${result.activeCaloriesToday.round()} ккал',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Синхронизация не удалась: ${_healthSyncService.formatUserError(e)}',
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isSyncingHealth = false);
+    }
   }
 
   void _calculateNutritionPlan() {
@@ -863,6 +958,52 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (_watchConnected) ...[
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.blue.shade50,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.blue.shade100),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.watch, color: Colors.blue.shade700, size: 22),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _watchPlatform.isEmpty
+                            ? 'Смарт-часы подключены'
+                            : _watchPlatform,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      if (_lastHealthSyncAt != null)
+                        Text(
+                          'Обновлено: ${_lastHealthSyncAt!.hour.toString().padLeft(2, '0')}:${_lastHealthSyncAt!.minute.toString().padLeft(2, '0')}',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade700,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                TextButton(
+                  onPressed: _isSyncingHealth ? null : _syncSmartWatch,
+                  child: Text(_isSyncingHealth ? 'Синхр...' : 'Обновить'),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+        ],
         Container(
           width: double.infinity,
           padding: const EdgeInsets.all(16),
@@ -1145,34 +1286,66 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
                   Row(
                     children: [
                       Icon(
-                        Icons.directions_walk,
+                        _watchConnected
+                            ? Icons.watch
+                            : Icons.directions_walk,
                         size: 18,
                         color: Colors.blue.shade400,
                       ),
                       const SizedBox(width: 6),
-                      const Text(
-                        "Шаги за день",
-                        style: TextStyle(
+                      Text(
+                        _watchConnected ? "Шаги со смарт-часов" : "Шаги за день",
+                        style: const TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.w500,
                         ),
                       ),
                     ],
                   ),
-                  IconButton(
-                    icon: Icon(
-                      Icons.edit,
-                      color: Colors.green.shade400,
-                      size: 24,
-                    ),
-                    onPressed: _showAddStepsDialog,
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (!_watchConnected)
+                        IconButton(
+                          icon: Icon(
+                            Icons.sync,
+                            color: Colors.blue.shade400,
+                            size: 24,
+                          ),
+                          tooltip: 'Подключить смарт-часы',
+                          onPressed:
+                              _isSyncingHealth ? null : _syncSmartWatch,
+                        ),
+                      if (_watchConnected)
+                        IconButton(
+                          icon: Icon(
+                            Icons.sync,
+                            color: Colors.blue.shade400,
+                            size: 24,
+                          ),
+                          tooltip: 'Обновить данные',
+                          onPressed:
+                              _isSyncingHealth ? null : _syncSmartWatch,
+                        ),
+                      if (!_watchConnected)
+                        IconButton(
+                          icon: Icon(
+                            Icons.edit,
+                            color: Colors.green.shade400,
+                            size: 24,
+                          ),
+                          onPressed: _showAddStepsDialog,
+                        ),
+                    ],
                   ),
                 ],
               ),
               const SizedBox(height: 8),
-              const Text(
-                "Количество шагов",
-                style: TextStyle(fontSize: 12, color: Colors.grey),
+              Text(
+                _watchConnected
+                    ? "Синхронизировано с ${_watchPlatform.isEmpty ? 'часами' : _watchPlatform}"
+                    : "Количество шагов",
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
               ),
               const SizedBox(height: 4),
               Text(
@@ -1182,6 +1355,17 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
                   fontWeight: FontWeight.bold,
                 ),
               ),
+              if (_watchConnected && _watchActiveCalories > 0) ...[
+                const SizedBox(height: 6),
+                Text(
+                  "${_watchActiveCalories.round()} ккал активности",
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Colors.grey.shade700,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -1210,7 +1394,7 @@ class _StatisticsScreenState extends State<StatisticsScreen> {
               ),
               const SizedBox(height: 8),
               _buildCalorieRow(
-                "От шагов",
+                _activityCaloriesLabel,
                 "${_stepsCalories} ккал",
                 Colors.grey,
               ),

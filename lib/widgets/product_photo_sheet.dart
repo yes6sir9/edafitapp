@@ -97,7 +97,7 @@ class _ProductPhotoSheetState extends State<_ProductPhotoSheet> {
       setState(() => _error = e.message);
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = 'Ошибка: $e');
+      setState(() => _error = _aiService.formatUserError(e));
     } finally {
       if (mounted) setState(() => _isAnalyzing = false);
     }
